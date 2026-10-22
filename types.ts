@@ -7,6 +7,9 @@ export interface User {
   // ID của admin đã tạo tài khoản này (phân quyền cách ly dữ liệu).
   // null/không có = dữ liệu cũ từ trước khi có tính năng admin phụ -> thuộc về admin gốc.
   createdBy?: string | null;
+  // Mã ngẫu nhiên dùng làm link cổng riêng của admin (VD: /chatgpt2faa/x7k2p9mq4a),
+  // thay cho việc để lộ username trên đường link. Chỉ tài khoản admin mới có.
+  portalSlug?: string | null;
 }
 
 export interface AuthState {
