@@ -57,7 +57,7 @@ const App: React.FC = () => {
 
   if (auth.isAuthenticated && auth.currentUser) {
     if (auth.currentUser.isAdmin) {
-      return <AdminPanel onLogout={handleLogout} />;
+      return <AdminPanel currentUser={auth.currentUser} onLogout={handleLogout} />;
     }
     return <UserPanel user={auth.currentUser} onLogout={handleLogout} />;
   }
