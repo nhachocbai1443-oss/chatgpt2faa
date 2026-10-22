@@ -1,26 +1,45 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { User } from '../types';
 import * as Storage from '../services/storage';
-import { UserPlus, Save, Trash2, Key, Search, Shield, LogOut, Download, Upload, RefreshCw, Database, AlertTriangle, QrCode } from 'lucide-react';
+import { UserPlus, Save, Trash2, Key, Search, Shield, ShieldPlus, LogOut, Download, Upload, RefreshCw, Database, AlertTriangle, QrCode } from 'lucide-react';
 import jsQR from 'jsqr';
 
 interface AdminPanelProps {
+  currentUser: User;
   onLogout: () => void;
 }
 
-export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
-  const [users, setUsers] = useState<User[]>([]);
+export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onLogout }) => {
+  const [allUsers, setAllUsers] = useState<User[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [newUsername, setNewUsername] = useState('');
   const [newSecret, setNewSecret] = useState('');
+  const [newSubAdminName, setNewSubAdminName] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editSecretValue, setEditSecretValue] = useState('');
   const [msg, setMsg] = useState<{ type: 'success' | 'error', text: string } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  
+
   // Refs for file inputs
   const backupInputRef = useRef<HTMLInputElement>(null);
   const qrInputRef = useRef<HTMLInputElement>(null);
+
+  const me = currentUser;
+  const iAmRoot = Storage.isRootAdmin(me);
+
+  // --- PHÂN QUYỀN CÁCH LY ---
+  // Mỗi admin (kể cả admin gốc) chỉ thấy các user thường do chính mình tạo.
+  // User cũ chưa có createdBy được tính là của admin gốc.
+  const users = allUsers.filter(u => !u.isAdmin && Storage.ownerIdOf(u) === me.id);
+
+  // Danh sách admin phụ — chỉ admin gốc mới quản lý được mục này
+  const subAdmins = iAmRoot
+    ? allUsers.filter(u => u.isAdmin && u.id !== me.id && !Storage.isRootAdmin(u))
+    : [];
+
+  // Số user mà mỗi admin phụ đang quản lý (chỉ để hiển thị cho admin gốc)
+  const countUsersOf = (adminId: string) =>
+    allUsers.filter(u => !u.isAdmin && u.createdBy === adminId).length;
 
   useEffect(() => {
     refreshUsers();
@@ -30,7 +49,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     setIsLoading(true);
     try {
       const data = await Storage.getStoredUsers();
-      setUsers(data);
+      setAllUsers(data);
     } catch (e) {
       setMsg({ type: 'error', text: 'Lỗi kết nối Database' });
     } finally {
@@ -44,16 +63,61 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
       setMsg({ type: 'error', text: 'Thiếu thông tin Username hoặc Secret' });
       return;
     }
-    
+
     setIsLoading(true);
     try {
-      await Storage.createUser(newUsername, newSecret);
+      await Storage.createUser(newUsername, newSecret, me.id);
       setNewUsername('');
       setNewSecret('');
       setMsg({ type: 'success', text: 'Đã thêm user mới' });
       await refreshUsers();
     } catch (error: any) {
       setMsg({ type: 'error', text: error.message || 'Lỗi khi tạo user' });
+      setIsLoading(false);
+    }
+  };
+
+  const handleCreateSubAdmin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newSubAdminName.trim()) {
+      setMsg({ type: 'error', text: 'Chưa nhập username cho admin phụ' });
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      await Storage.createSubAdmin(newSubAdminName.trim(), me.id);
+      setNewSubAdminName('');
+      setMsg({ type: 'success', text: 'Đã thêm admin phụ. Họ đăng nhập bằng đúng username vừa tạo.' });
+      await refreshUsers();
+    } catch (error: any) {
+      setMsg({ type: 'error', text: error.message || 'Lỗi khi tạo admin phụ' });
+      setIsLoading(false);
+    }
+  };
+
+  const handleDeleteSubAdmin = async (e: React.MouseEvent, sub: User) => {
+    e.stopPropagation();
+    e.preventDefault();
+
+    const owned = countUsersOf(sub.id);
+    if (owned > 0) {
+      setMsg({
+        type: 'error',
+        text: `Chưa xóa được: admin phụ "${sub.username}" đang quản lý ${owned} user. Vì dữ liệu cách ly hoàn toàn, hãy để họ tự xóa/chuyển hết user của họ trước, nếu không các user đó sẽ không còn ai quản lý.`
+      });
+      return;
+    }
+
+    if (!window.confirm(`Xác nhận xóa admin phụ "${sub.username}"?`)) return;
+
+    setIsLoading(true);
+    try {
+      await Storage.deleteUser(sub.id);
+      await refreshUsers();
+      setMsg({ type: 'success', text: 'Đã xóa admin phụ' });
+    } catch (error: any) {
+      setMsg({ type: 'error', text: 'Lỗi xóa admin phụ: ' + error.message });
       setIsLoading(false);
     }
   };
@@ -86,14 +150,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     if(!window.confirm(`Xác nhận xóa user "${userToDelete.username}"? (Hệ thống sẽ thử xóa vĩnh viễn khỏi Database, nếu không được sẽ chuyển vào thùng rác)`)) return;
 
     setIsLoading(true);
-    
+
     try {
       // Gọi hàm xóa (tự động xử lý Hard/Soft delete)
       await Storage.deleteUser(userToDelete.id);
-      
+
       // Tải lại danh sách
       await refreshUsers();
-      
+
       setMsg({ type: 'success', text: 'Đã xóa user thành công' });
     } catch (error: any) {
       console.error("Delete failed", error);
@@ -103,7 +167,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
   };
 
   const handleBackup = () => {
-    const dataStr = JSON.stringify(users, null, 2);
+    // Backup theo đúng phạm vi dữ liệu người đang đăng nhập được quản lý:
+    // admin gốc có thêm danh sách tài khoản admin phụ, admin phụ chỉ có user của mình.
+    const backupData = iAmRoot ? [...users, ...subAdmins] : users;
+    const dataStr = JSON.stringify(backupData, null, 2);
     const blob = new Blob([dataStr], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -124,7 +191,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     reader.onload = async (event) => {
       const content = event.target?.result as string;
       setIsLoading(true);
-      const success = await Storage.importUsers(content);
+      const success = await Storage.importUsers(content, me);
       if (success) {
         setMsg({ type: 'success', text: 'Import dữ liệu thành công' });
         await refreshUsers();
@@ -183,7 +250,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
       img.src = event.target?.result as string;
     };
     reader.readAsDataURL(file);
-    
+
     // Reset input để chọn lại file cũ được
     if (qrInputRef.current) qrInputRef.current.value = '';
   };
@@ -195,7 +262,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 p-4 md:p-8">
       <div className="max-w-6xl mx-auto space-y-8">
-        
+
         {/* Header */}
         <div className="flex flex-col md:flex-row justify-between items-center gap-4 bg-slate-800 p-6 rounded-2xl shadow-lg border border-slate-700">
           <div className="flex items-center gap-3">
@@ -206,17 +273,22 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
               <h1 className="text-2xl font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
                 Quản Trị Hệ Thống
               </h1>
-              <p className="text-slate-400 text-sm">Supabase Connected</p>
+              <p className="text-slate-400 text-sm">
+                Supabase Connected · Đăng nhập: <span className="text-slate-200 font-medium">{me.username}</span>
+                <span className={`ml-2 px-2 py-0.5 rounded-full text-[11px] font-semibold ${iAmRoot ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' : 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30'}`}>
+                  {iAmRoot ? 'Admin gốc' : 'Admin phụ'}
+                </span>
+              </p>
             </div>
           </div>
-          
+
           <div className="flex items-center gap-2">
             {isLoading && <RefreshCw className="w-5 h-5 animate-spin text-indigo-400 mr-2" />}
-            
+
             <button onClick={handleBackup} disabled={isLoading} className="btn-icon bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded-lg flex gap-2 items-center text-sm border border-slate-600">
               <Download className="w-4 h-4 text-emerald-400" /> Backup
             </button>
-            
+
             <button onClick={triggerRestore} disabled={isLoading} className="btn-icon bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded-lg flex gap-2 items-center text-sm border border-slate-600">
               <Upload className="w-4 h-4 text-blue-400" /> Restore
             </button>
@@ -242,10 +314,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          
-          {/* Create Form */}
-          <div className="lg:col-span-1">
-            <div className="bg-slate-800 rounded-2xl p-6 shadow-lg border border-slate-700 sticky top-8">
+
+          {/* Cột trái: Form tạo user + (chỉ admin gốc) quản lý admin phụ */}
+          <div className="lg:col-span-1 space-y-8">
+            <div className="bg-slate-800 rounded-2xl p-6 shadow-lg border border-slate-700 lg:sticky lg:top-8">
               <h2 className="text-lg font-semibold mb-4 flex items-center gap-2 text-white">
                 <UserPlus className="w-5 h-5 text-indigo-400" /> Thêm User
               </h2>
@@ -272,22 +344,22 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                       className="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 focus:border-indigo-500 outline-none font-mono text-sm text-white"
                       placeholder="JBSWY3..."
                     />
-                    
+
                     {/* Nút Scan QR */}
-                    <button 
-                      type="button" 
+                    <button
+                      type="button"
                       onClick={() => qrInputRef.current?.click()}
                       className="p-2 bg-slate-700 hover:bg-indigo-600 text-slate-300 hover:text-white rounded-lg transition-colors border border-slate-600"
                       title="Quét mã QR từ ảnh"
                     >
                       <QrCode className="w-5 h-5" />
                     </button>
-                    <input 
-                      type="file" 
-                      ref={qrInputRef} 
-                      onChange={handleQrUpload} 
-                      accept="image/*" 
-                      className="hidden" 
+                    <input
+                      type="file"
+                      ref={qrInputRef}
+                      onChange={handleQrUpload}
+                      accept="image/*"
+                      className="hidden"
                     />
                   </div>
                 </div>
@@ -296,15 +368,81 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                 </button>
               </form>
             </div>
+
+            {/* Quản lý Admin phụ — chỉ admin gốc thấy mục này */}
+            {iAmRoot && (
+              <div className="bg-slate-800 rounded-2xl p-6 shadow-lg border border-slate-700">
+                <h2 className="text-lg font-semibold mb-1 flex items-center gap-2 text-white">
+                  <ShieldPlus className="w-5 h-5 text-amber-400" /> Admin Phụ
+                </h2>
+                <p className="text-xs text-slate-400 mb-4">
+                  Admin phụ đăng nhập bằng username được cấp, có trang quản trị riêng và
+                  chỉ thấy các user do chính họ tạo. Bạn cũng chỉ thấy user của bạn — dữ liệu cách ly hoàn toàn.
+                </p>
+                <form onSubmit={handleCreateSubAdmin} className="space-y-3 mb-5">
+                  <div>
+                    <label className="text-xs font-medium text-slate-400 block mb-1">Username admin phụ</label>
+                    <input
+                      type="text"
+                      value={newSubAdminName}
+                      onChange={(e) => setNewSubAdminName(e.target.value)}
+                      disabled={isLoading}
+                      className="w-full bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 focus:border-amber-500 outline-none text-white"
+                      placeholder="VD: adminphu1"
+                    />
+                  </div>
+                  <button type="submit" disabled={isLoading} className="w-full bg-amber-600 hover:bg-amber-500 text-white font-medium py-2 rounded-lg transition-all shadow-lg shadow-amber-500/20 flex justify-center items-center gap-2">
+                    {isLoading ? 'Đang xử lý...' : 'Tạo Admin Phụ'}
+                  </button>
+                </form>
+
+                <div className="space-y-2">
+                  {subAdmins.map(sub => (
+                    <div key={sub.id} className="flex items-center justify-between gap-3 bg-slate-900/50 border border-slate-700/50 rounded-lg px-3 py-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-8 h-8 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold flex-shrink-0">
+                          {sub.username.charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-slate-200 truncate flex items-center gap-1">
+                            {sub.username}
+                            <Shield className="w-3 h-3 text-amber-400 flex-shrink-0" />
+                          </p>
+                          <p className="text-[11px] text-slate-500">
+                            Đang quản lý {countUsersOf(sub.id)} user
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => handleDeleteSubAdmin(e, sub)}
+                        disabled={isLoading}
+                        className="p-2 bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white rounded-lg transition-colors border border-rose-500/20 shadow-sm cursor-pointer flex-shrink-0"
+                        title="Xóa admin phụ này"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                  {subAdmins.length === 0 && (
+                    <p className="text-center text-slate-500 text-sm italic py-2">Chưa có admin phụ nào</p>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* List */}
           <div className="lg:col-span-2 space-y-4">
+            <p className="text-sm text-slate-400">
+              Danh sách user của bạn <span className="text-slate-500">({users.length})</span>
+              {!iAmRoot && <span className="text-slate-500"> — chỉ hiển thị các user do bạn tạo</span>}
+            </p>
             <div className="flex items-center gap-2 bg-slate-800 p-2 rounded-lg border border-slate-700 mb-4">
               <Search className="w-5 h-5 text-slate-500 ml-2" />
-              <input 
-                type="text" 
-                placeholder="Tìm kiếm..." 
+              <input
+                type="text"
+                placeholder="Tìm kiếm..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="bg-transparent border-none outline-none text-slate-200 w-full p-1"
@@ -316,66 +454,57 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                 <div key={user.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700 hover:border-slate-600 transition-all group">
                   <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div className="flex items-center gap-3 min-w-[150px]">
-                      <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg ${user.isAdmin ? 'bg-amber-500/20 text-amber-400' : 'bg-cyan-500/20 text-cyan-400'}`}>
+                      <div className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg bg-cyan-500/20 text-cyan-400">
                         {user.username.charAt(0).toUpperCase()}
                       </div>
                       <div>
                         <h3 className="font-semibold text-slate-200 flex items-center gap-2">
                           {user.username}
-                          {user.isAdmin && <Shield className="w-3 h-3 text-amber-400" />}
                         </h3>
                         <p className="text-[10px] text-slate-500 font-mono">{user.id.slice(0, 6)}...</p>
                       </div>
                     </div>
 
                     <div className="flex-1 md:px-4">
-                       {user.isAdmin ? (
-                         <div className="text-slate-600 text-sm italic">System Admin</div>
-                       ) : (
-                         editingId === user.id ? (
-                           <div className="flex gap-2">
-                             <input 
-                               type="text" 
-                               value={editSecretValue}
-                               onChange={(e) => setEditSecretValue(e.target.value)}
-                               className="flex-1 bg-slate-900 border border-indigo-500 rounded px-3 py-1 font-mono text-sm text-white"
-                             />
-                             <button onClick={() => saveEdit(user.id)} className="p-2 bg-emerald-500/20 text-emerald-400 rounded hover:bg-emerald-500/30"><Save className="w-4 h-4"/></button>
-                             <button onClick={() => setEditingId(null)} className="p-2 bg-slate-700 text-slate-400 rounded hover:bg-slate-600">✕</button>
-                           </div>
-                         ) : (
-                           <div className="bg-slate-900/50 rounded px-3 py-2 font-mono text-sm text-slate-400 border border-slate-700/50 flex items-center gap-2 overflow-hidden">
-                             <Key className="w-3 h-3 text-slate-600 flex-shrink-0" />
-                             <span className="truncate">{user.secret}</span>
-                           </div>
-                         )
-                       )}
+                      {editingId === user.id ? (
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={editSecretValue}
+                            onChange={(e) => setEditSecretValue(e.target.value)}
+                            className="flex-1 bg-slate-900 border border-indigo-500 rounded px-3 py-1 font-mono text-sm text-white"
+                          />
+                          <button onClick={() => saveEdit(user.id)} className="p-2 bg-emerald-500/20 text-emerald-400 rounded hover:bg-emerald-500/30"><Save className="w-4 h-4"/></button>
+                          <button onClick={() => setEditingId(null)} className="p-2 bg-slate-700 text-slate-400 rounded hover:bg-slate-600">✕</button>
+                        </div>
+                      ) : (
+                        <div className="bg-slate-900/50 rounded px-3 py-2 font-mono text-sm text-slate-400 border border-slate-700/50 flex items-center gap-2 overflow-hidden">
+                          <Key className="w-3 h-3 text-slate-600 flex-shrink-0" />
+                          <span className="truncate">{user.secret}</span>
+                        </div>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-2">
-                      {!user.isAdmin && (
-                         <>
-                            {editingId !== user.id && (
-                              <button onClick={() => startEditing(user)} disabled={isLoading} className="p-2 hover:bg-indigo-500/20 hover:text-indigo-400 text-slate-500 rounded-lg transition-colors">
-                                <span className="text-xs font-medium">Sửa</span>
-                              </button>
-                            )}
-                            <button 
-                              type="button"
-                              onClick={(e) => handleDelete(e, user)} 
-                              disabled={isLoading} 
-                              className="p-2 bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white rounded-lg transition-colors border border-rose-500/20 shadow-sm cursor-pointer z-10"
-                              title="Xóa user này"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                         </>
+                      {editingId !== user.id && (
+                        <button onClick={() => startEditing(user)} disabled={isLoading} className="p-2 hover:bg-indigo-500/20 hover:text-indigo-400 text-slate-500 rounded-lg transition-colors">
+                          <span className="text-xs font-medium">Sửa</span>
+                        </button>
                       )}
+                      <button
+                        type="button"
+                        onClick={(e) => handleDelete(e, user)}
+                        disabled={isLoading}
+                        className="p-2 bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white rounded-lg transition-colors border border-rose-500/20 shadow-sm cursor-pointer z-10"
+                        title="Xóa user này"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                     </div>
                   </div>
                 </div>
               ))}
-              
+
               {filteredUsers.length === 0 && (
                 <div className="text-center py-12 text-slate-500 italic">
                   Không tìm thấy user nào
