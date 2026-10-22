@@ -4,6 +4,9 @@ export interface User {
   secret: string;
   isAdmin: boolean;
   createdAt: number;
+  // ID của admin đã tạo tài khoản này (phân quyền cách ly dữ liệu).
+  // null/không có = dữ liệu cũ từ trước khi có tính năng admin phụ -> thuộc về admin gốc.
+  createdBy?: string | null;
 }
 
 export interface AuthState {
