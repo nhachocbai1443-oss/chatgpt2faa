@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { User } from '../types';
 import * as Storage from '../services/storage';
-import { UserPlus, Save, Trash2, Key, Search, Shield, ShieldPlus, LogOut, Download, Upload, RefreshCw, Database, AlertTriangle, QrCode } from 'lucide-react';
+import { UserPlus, Save, Trash2, Key, Search, Shield, ShieldPlus, LogOut, Download, Upload, RefreshCw, Database, AlertTriangle, QrCode, Copy, Link2 } from 'lucide-react';
 import jsQR from 'jsqr';
 
 interface AdminPanelProps {
@@ -40,6 +40,23 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onLogout })
   // Số user mà mỗi admin phụ đang quản lý (chỉ để hiển thị cho admin gốc)
   const countUsersOf = (adminId: string) =>
     allUsers.filter(u => !u.isAdmin && u.createdBy === adminId).length;
+
+  // --- LINK CỔNG RIÊNG ---
+  // Admin gốc dùng link gốc; mỗi admin phụ có link /<username> của riêng mình.
+  // User chỉ đăng nhập được ở cổng của admin đã tạo ra mình nên không lo trùng tên.
+  const siteBase = `${window.location.origin}/chatgpt2faa/`;
+  const portalLinkOf = (admin: User) =>
+    Storage.isRootAdmin(admin) ? siteBase : `${siteBase}${admin.username}`;
+  const myPortalLink = portalLinkOf(me);
+
+  const copyLink = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setMsg({ type: 'success', text: 'Đã sao chép link cổng' });
+    } catch {
+      setMsg({ type: 'error', text: 'Không sao chép tự động được, hãy bôi đen link rồi copy thủ công' });
+    }
+  };
 
   useEffect(() => {
     refreshUsers();
@@ -86,9 +103,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onLogout })
 
     setIsLoading(true);
     try {
-      await Storage.createSubAdmin(newSubAdminName.trim(), me.id);
+      const createdName = newSubAdminName.trim();
+      await Storage.createSubAdmin(createdName, me.id);
       setNewSubAdminName('');
-      setMsg({ type: 'success', text: 'Đã thêm admin phụ. Họ đăng nhập bằng đúng username vừa tạo.' });
+      setMsg({ type: 'success', text: `Đã thêm admin phụ. Link cổng riêng của họ: ${siteBase}${createdName} — gửi link này cho họ, họ và user của họ đăng nhập tại đó.` });
       await refreshUsers();
     } catch (error: any) {
       setMsg({ type: 'error', text: error.message || 'Lỗi khi tạo admin phụ' });
@@ -313,6 +331,27 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onLogout })
           </div>
         )}
 
+        {/* Link cổng của người đang đăng nhập */}
+        <div className="flex flex-col md:flex-row md:items-center gap-3 bg-slate-800 p-4 rounded-2xl shadow-lg border border-slate-700">
+          <div className="flex items-center gap-2 text-slate-300 text-sm font-medium whitespace-nowrap">
+            <Link2 className="w-4 h-4 text-cyan-400" /> Link cổng của bạn:
+          </div>
+          <code className="flex-1 bg-slate-900/60 border border-slate-700/60 rounded-lg px-3 py-2 font-mono text-sm text-cyan-300 truncate" title={myPortalLink}>
+            {myPortalLink}
+          </code>
+          <button
+            onClick={() => copyLink(myPortalLink)}
+            className="flex items-center justify-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg border border-slate-600 text-sm font-medium whitespace-nowrap"
+          >
+            <Copy className="w-4 h-4" /> Sao chép
+          </button>
+          <p className="text-xs text-slate-500 md:max-w-xs">
+            {iAmRoot
+              ? 'User của bạn đăng nhập ở link gốc này. Mỗi admin phụ có link riêng theo tên của họ ở mục Admin Phụ.'
+              : 'Gửi link này cho user của bạn: họ đăng nhập tại đây và chỉ thuộc quyền quản lý của bạn, trùng tên với user của admin khác cũng không sao.'}
+          </p>
+        </div>
+
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
 
           {/* Cột trái: Form tạo user + (chỉ admin gốc) quản lý admin phụ */}
@@ -410,6 +449,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onLogout })
                           </p>
                           <p className="text-[11px] text-slate-500">
                             Đang quản lý {countUsersOf(sub.id)} user
+                          </p>
+                          <p className="text-[11px] text-cyan-400/80 font-mono flex items-center gap-1" title={portalLinkOf(sub)}>
+                            <span className="truncate">{portalLinkOf(sub)}</span>
+                            <button
+                              type="button"
+                              onClick={() => copyLink(portalLinkOf(sub))}
+                              className="p-0.5 text-slate-400 hover:text-cyan-300 flex-shrink-0"
+                              title="Sao chép link cổng của admin phụ này"
+                            >
+                              <Copy className="w-3 h-3" />
+                            </button>
                           </p>
                         </div>
                       </div>
