@@ -1,10 +1,34 @@
 import React, { useState, useEffect } from 'react';
 import { User, AuthState } from './types';
 import * as Storage from './services/storage';
+import { DEFAULT_ADMIN } from './constants';
 import { syncTime } from './services/totpService';
 import { AdminPanel } from './components/AdminPanel';
 import { UserPanel } from './components/UserPanel';
-import { Lock, ArrowRight, ShieldCheck } from 'lucide-react';
+import { Lock, ArrowRight, ShieldCheck, AlertTriangle, Home } from 'lucide-react';
+
+// Khớp với "base" trong vite.config.ts
+const BASE_PATH = '/chatgpt2faa';
+
+// Đọc tên cổng từ URL: /chatgpt2faa/<ten-admin> (hoặc dự phòng dạng #/<ten-admin>).
+// Trả về null nếu đang ở link gốc (cổng của admin gốc).
+const parsePortalSlug = (): string | null => {
+  let segment = '';
+  const path = window.location.pathname;
+  const rest = path.startsWith(BASE_PATH) ? path.slice(BASE_PATH.length) : path;
+  segment = rest.split('/').filter(Boolean)[0] || '';
+
+  if (!segment && window.location.hash) {
+    segment = window.location.hash.replace(/^#\/?/, '').split('/').filter(Boolean)[0] || '';
+  }
+
+  if (!segment) return null;
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+};
 
 const App: React.FC = () => {
   const [auth, setAuth] = useState<AuthState>({
@@ -15,9 +39,38 @@ const App: React.FC = () => {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
+  // Trạng thái cổng: 'loading' (đang xác định chủ cổng) | 'ready' | 'invalid' (link sai)
+  const [portalState, setPortalState] = useState<'loading' | 'ready' | 'invalid'>('loading');
+  const [portalSlug, setPortalSlug] = useState<string | null>(null);
+  // Chủ cổng khi vào bằng link con; null = cổng chính của admin gốc
+  const [portalAdmin, setPortalAdmin] = useState<User | null>(null);
+
   // Kích hoạt đồng bộ thời gian khi app chạy lần đầu
   useEffect(() => {
     syncTime();
+  }, []);
+
+  // Xác định chủ cổng từ URL ngay khi mở trang
+  useEffect(() => {
+    const slug = parsePortalSlug();
+    setPortalSlug(slug);
+    if (!slug) {
+      setPortalAdmin(null);
+      setPortalState('ready');
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const admin = await Storage.findAdminByUsername(slug);
+      if (cancelled) return;
+      if (admin) {
+        setPortalAdmin(admin);
+        setPortalState('ready');
+      } else {
+        setPortalState('invalid');
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -28,8 +81,18 @@ const App: React.FC = () => {
     setError('');
 
     try {
-      // Find user (Async operation with GitHub)
-      const user = await Storage.findUserByUsername(usernameInput.trim());
+      const input = usernameInput.trim();
+      let user: User | null = null;
+
+      if (!portalAdmin && input.toLowerCase() === DEFAULT_ADMIN.username.toLowerCase()) {
+        // Ở cổng chính, admin gốc đăng nhập qua hàm cũ để giữ cơ chế tự khôi phục tài khoản
+        const found = await Storage.findUserByUsername(input);
+        user = found && found.isAdmin ? found : null;
+      } else {
+        // Trong một cổng: chỉ chấp nhận chủ cổng hoặc user do chủ cổng tạo
+        const owner = portalAdmin ?? DEFAULT_ADMIN;
+        user = await Storage.findUserInPortal(input, owner);
+      }
 
       if (user) {
         setAuth({
@@ -62,10 +125,45 @@ const App: React.FC = () => {
     return <UserPanel user={auth.currentUser} onLogout={handleLogout} />;
   }
 
+  // Đang xác định chủ cổng
+  if (portalState === 'loading') {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+        <p className="text-slate-400 text-sm animate-pulse">Đang tải...</p>
+      </div>
+    );
+  }
+
+  // Link cổng không tồn tại (không có admin nào mang tên này)
+  if (portalState === 'invalid') {
+    return (
+      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md bg-slate-800/50 backdrop-blur-lg border border-slate-700/50 p-8 rounded-3xl shadow-2xl text-center">
+          <div className="w-16 h-16 bg-rose-500/15 border border-rose-500/30 rounded-2xl flex items-center justify-center mx-auto mb-4">
+            <AlertTriangle className="w-8 h-8 text-rose-400" />
+          </div>
+          <h1 className="text-2xl font-bold text-white mb-2">Link không hợp lệ</h1>
+          <p className="text-slate-400 text-sm mb-6">
+            Không có cổng quản trị nào mang tên <span className="text-slate-200 font-medium">"{portalSlug}"</span>.
+            Hãy kiểm tra lại đường link admin đã gửi cho bạn.
+          </p>
+          <a
+            href={`${BASE_PATH}/`}
+            className="inline-flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white font-bold px-6 py-3 rounded-xl shadow-lg shadow-indigo-500/25 transition-all"
+          >
+            <Home className="w-5 h-5" /> Tới trang đăng nhập chính
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  const isSubPortal = !!portalAdmin && !Storage.isRootAdmin(portalAdmin);
+
   // Login Screen
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4 relative overflow-hidden">
-      
+
       {/* Background Ambience */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-0 left-1/4 w-96 h-96 bg-indigo-600/10 rounded-full blur-[128px]" />
@@ -73,13 +171,18 @@ const App: React.FC = () => {
       </div>
 
       <div className="w-full max-w-md bg-slate-800/50 backdrop-blur-lg border border-slate-700/50 p-8 rounded-3xl shadow-2xl relative z-10">
-        
+
         <div className="flex flex-col items-center mb-8">
           <div className="w-16 h-16 bg-gradient-to-br from-indigo-500 to-cyan-500 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-500/20 mb-4 transform rotate-3">
              <ShieldCheck className="w-8 h-8 text-white" />
           </div>
           <h1 className="text-3xl font-bold text-white mb-1">Welcome Back</h1>
           <p className="text-slate-400 text-sm">Secure Authentication Portal</p>
+          {isSubPortal && (
+            <span className="mt-3 px-3 py-1 rounded-full text-xs font-medium bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+              Cổng của admin: {portalAdmin.username}
+            </span>
+          )}
         </div>
 
         <form onSubmit={handleLogin} className="space-y-6">
