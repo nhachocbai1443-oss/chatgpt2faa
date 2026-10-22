@@ -3,7 +3,8 @@ import { User } from '../types';
 import { DEFAULT_ADMIN, DEFAULT_USER } from '../constants';
 
 // --- PHÂN QUYỀN ADMIN GỐC / ADMIN PHỤ + LINK CỔNG RIÊNG ---
-// Mỗi admin có một "cổng" (portal) riêng theo link: /chatgpt2faa/<username-cua-admin>
+// Mỗi admin phụ có một "cổng" (portal) riêng theo link: /chatgpt2faa/<ma-ngau-nhien>
+// Mã link là chuỗi ngẫu nhiên (portalSlug), KHÔNG dùng username để tránh lộ tên admin.
 // User chỉ đăng nhập được ở cổng của admin đã tạo ra mình, nên các admin khác nhau
 // có thể tạo user trùng tên nhau mà không xung đột.
 
@@ -28,6 +29,42 @@ const listByUsername = async (username: string): Promise<User[]> => {
 
   if (error) throw error;
   return ((data as User[]) || []).filter(u => !u.username.startsWith('__TRASH__'));
+};
+
+// --- MÃ LINK CỔNG NGẪU NHIÊN ---
+
+const SLUG_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789'; // bỏ ký tự dễ nhìn nhầm (0/o, 1/l/i)
+
+const generatePortalSlug = (): string => {
+  const bytes = new Uint8Array(10);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => SLUG_ALPHABET[b % SLUG_ALPHABET.length]).join('');
+};
+
+// Sinh mã chưa ai dùng (kiểm tra trùng trong database, thử lại tối đa 5 lần)
+const makeUniquePortalSlug = async (): Promise<string> => {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const slug = generatePortalSlug();
+    const { data, error } = await supabase
+      .from('users')
+      .select('id')
+      .eq('portalSlug', slug);
+    if (error) throw error;
+    if (!data || data.length === 0) return slug;
+  }
+  throw new Error('Không tạo được mã link, hãy thử lại');
+};
+
+// Cấp mã link MỚI cho một admin (dùng khi tạo admin phụ, tự cấp cho dữ liệu cũ,
+// hoặc đổi link khi link cũ bị lộ — link cũ ngừng hoạt động ngay sau khi đổi).
+export const assignPortalSlug = async (adminId: string): Promise<string> => {
+  const slug = await makeUniquePortalSlug();
+  const { error } = await supabase
+    .from('users')
+    .update({ portalSlug: slug })
+    .eq('id', adminId);
+  if (error) throw error;
+  return slug;
 };
 
 // --- SUPABASE METHODS ---
@@ -84,8 +121,7 @@ export const findUserByUsername = async (username: string): Promise<User | null>
   }
 };
 
-// Tìm tài khoản ADMIN theo username — dùng để xác định chủ nhân của link cổng /<username>.
-// Trả về null nếu không có admin nào tên như vậy (link không hợp lệ).
+// Tìm tài khoản ADMIN theo username (dùng nội bộ + cầu nối chuyển đổi link cũ).
 export const findAdminByUsername = async (username: string): Promise<User | null> => {
   try {
     const rows = await listByUsername(username);
@@ -100,6 +136,33 @@ export const findAdminByUsername = async (username: string): Promise<User | null
     return null;
   } catch (error) {
     console.error("Error finding admin:", error);
+    return null;
+  }
+};
+
+// Xác định chủ cổng từ đoạn cuối của link (/chatgpt2faa/<slug>):
+// - Ưu tiên khớp portalSlug (mã ngẫu nhiên).
+// - Cầu nối chuyển đổi: admin phụ tạo ở bản trước CHƯA có mã thì vẫn vào được bằng
+//   link tên cũ; ngay khi được cấp mã, link tên cũ hết hiệu lực.
+export const findAdminBySlug = async (slug: string): Promise<User | null> => {
+  const key = slug.trim().toLowerCase();
+  if (!key) return null;
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('portalSlug', key);
+
+    if (!error && data) {
+      const admin = (data as User[]).find(u => u.isAdmin && !u.username.startsWith('__TRASH__'));
+      if (admin) return admin;
+    }
+
+    const byName = await findAdminByUsername(key);
+    if (byName && !byName.portalSlug) return byName;
+    return null;
+  } catch (error) {
+    console.error("Error finding admin by slug:", error);
     return null;
   }
 };
@@ -123,8 +186,7 @@ export const findUserInPortal = async (username: string, portalAdmin: User): Pro
 };
 
 // Kiểm tra tên khi tạo USER THƯỜNG cho một admin:
-// - Không được trùng tên bất kỳ tài khoản admin nào (tên admin là duy nhất toàn hệ thống,
-//   vì còn dùng làm link cổng).
+// - Không được trùng tên bất kỳ tài khoản admin nào (tên admin là duy nhất toàn hệ thống).
 // - Không được trùng user khác CỦA CÙNG admin đó.
 // - Trùng tên user của admin khác thì ĐƯỢC PHÉP (mỗi cổng là một không gian riêng).
 const assertNameAvailableForUser = async (username: string, ownerId: string) => {
@@ -142,7 +204,8 @@ const insertAccount = async (
   username: string,
   secret: string,
   isAdmin: boolean,
-  createdBy: string
+  createdBy: string,
+  portalSlug?: string
 ): Promise<User> => {
   const newUser: User = {
     id: crypto.randomUUID(),
@@ -150,7 +213,8 @@ const insertAccount = async (
     secret,
     isAdmin,
     createdAt: Date.now(),
-    createdBy
+    createdBy,
+    ...(portalSlug ? { portalSlug } : {})
   };
 
   const { error } = await supabase.from('users').insert([newUser]);
@@ -166,8 +230,8 @@ export const createUser = async (username: string, secret: string, createdBy: st
 };
 
 // Tạo admin phụ (chỉ admin gốc mới được gọi hàm này từ giao diện).
-// Tên admin phụ phải duy nhất trên TOÀN hệ thống (vì dùng làm link cổng),
-// nên không được trùng bất kỳ user/admin nào đang có.
+// Tên admin phụ phải duy nhất trên TOÀN hệ thống, và tài khoản được cấp ngay
+// một mã link ngẫu nhiên để làm cổng riêng.
 export const createSubAdmin = async (username: string, createdBy: string): Promise<User> => {
   if (username.toLowerCase() === DEFAULT_ADMIN.username.toLowerCase()) {
     throw new Error("Tên này trùng với admin gốc");
@@ -176,7 +240,8 @@ export const createSubAdmin = async (username: string, createdBy: string): Promi
   if (rows.length > 0) {
     throw new Error("Tên này đã có người dùng, hãy chọn tên khác cho admin phụ");
   }
-  return insertAccount(username, '', true, createdBy);
+  const slug = await makeUniquePortalSlug();
+  return insertAccount(username, '', true, createdBy, slug);
 };
 
 export const updateUserSecret = async (id: string, newSecret: string) => {
@@ -247,7 +312,8 @@ export const importUsers = async (jsonString: string, importer: User): Promise<b
           }
           // Admin phụ import: mọi dòng đều thành user thường thuộc về chính họ,
           // tránh việc import file backup để tự tạo tài khoản admin khác.
-          return { ...u, isAdmin: false, createdBy: importer.id };
+          // Đồng thời gỡ portalSlug để không chiếm link cổng của admin khác.
+          return { ...u, isAdmin: false, createdBy: importer.id, portalSlug: null };
         });
 
       if (users.length === 0) return false;
