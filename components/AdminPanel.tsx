@@ -45,8 +45,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onLogout })
   // Admin gốc dùng link gốc; mỗi admin phụ có link /<username> của riêng mình.
   // User chỉ đăng nhập được ở cổng của admin đã tạo ra mình nên không lo trùng tên.
   const siteBase = `${window.location.origin}/chatgpt2faa/`;
+  // Link cổng dùng MÃ NGẪU NHIÊN (portalSlug), không dùng username để tránh lộ tên admin.
+  // Admin phụ cũ chưa có mã thì tạm hiện link tên trong lúc chờ được cấp mã tự động.
   const portalLinkOf = (admin: User) =>
-    Storage.isRootAdmin(admin) ? siteBase : `${siteBase}${admin.username}`;
+    Storage.isRootAdmin(admin) ? siteBase : `${siteBase}${admin.portalSlug || admin.username}`;
   const myPortalLink = portalLinkOf(me);
 
   const copyLink = async (url: string) => {
@@ -65,7 +67,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onLogout })
   const refreshUsers = async () => {
     setIsLoading(true);
     try {
-      const data = await Storage.getStoredUsers();
+      let data = await Storage.getStoredUsers();
+      // Admin gốc: tự cấp mã link ngẫu nhiên cho admin phụ nào chưa có
+      // (admin phụ tạo từ bản trước, khi link còn dùng username)
+      if (iAmRoot) {
+        const missing = data.filter(u => u.isAdmin && !Storage.isRootAdmin(u) && !u.portalSlug);
+        if (missing.length > 0) {
+          for (const sub of missing) {
+            try { await Storage.assignPortalSlug(sub.id); } catch { /* bỏ qua, lần tải sau sẽ thử lại */ }
+          }
+          data = await Storage.getStoredUsers();
+        }
+      }
       setAllUsers(data);
     } catch (e) {
       setMsg({ type: 'error', text: 'Lỗi kết nối Database' });
@@ -104,9 +117,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onLogout })
     setIsLoading(true);
     try {
       const createdName = newSubAdminName.trim();
-      await Storage.createSubAdmin(createdName, me.id);
+      const created = await Storage.createSubAdmin(createdName, me.id);
       setNewSubAdminName('');
-      setMsg({ type: 'success', text: `Đã thêm admin phụ. Link cổng riêng của họ: ${siteBase}${createdName} — gửi link này cho họ, họ và user của họ đăng nhập tại đó.` });
+      setMsg({ type: 'success', text: `Đã thêm admin phụ. Link cổng riêng của họ: ${siteBase}${created.portalSlug ?? createdName} — gửi link này cho họ, họ và user của họ đăng nhập tại đó.` });
       await refreshUsers();
     } catch (error: any) {
       setMsg({ type: 'error', text: error.message || 'Lỗi khi tạo admin phụ' });
@@ -136,6 +149,21 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onLogout })
       setMsg({ type: 'success', text: 'Đã xóa admin phụ' });
     } catch (error: any) {
       setMsg({ type: 'error', text: 'Lỗi xóa admin phụ: ' + error.message });
+      setIsLoading(false);
+    }
+  };
+
+  // Đổi mã link cổng cho admin phụ (link cũ ngừng hoạt động ngay)
+  const handleRegenerateSlug = async (sub: User) => {
+    if (!window.confirm(`Đổi link cổng của admin phụ "${sub.username}"? Link cũ sẽ ngừng hoạt động ngay, user của họ phải dùng link mới.`)) return;
+
+    setIsLoading(true);
+    try {
+      await Storage.assignPortalSlug(sub.id);
+      await refreshUsers();
+      setMsg({ type: 'success', text: `Đã đổi link cổng mới cho admin phụ "${sub.username}"` });
+    } catch (error: any) {
+      setMsg({ type: 'error', text: 'Lỗi đổi link: ' + (error.message || 'Thử lại sau') });
       setIsLoading(false);
     }
   };
@@ -459,6 +487,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onLogout })
                               title="Sao chép link cổng của admin phụ này"
                             >
                               <Copy className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRegenerateSlug(sub)}
+                              disabled={isLoading}
+                              className="p-0.5 text-slate-400 hover:text-amber-300 flex-shrink-0"
+                              title="Đổi link cổng mới (link cũ ngừng hoạt động)"
+                            >
+                              <RefreshCw className="w-3 h-3" />
                             </button>
                           </p>
                         </div>
