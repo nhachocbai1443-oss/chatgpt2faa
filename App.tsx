@@ -180,7 +180,7 @@ const App: React.FC = () => {
           <p className="text-slate-400 text-sm">Secure Authentication Portal</p>
           {isSubPortal && (
             <span className="mt-3 px-3 py-1 rounded-full text-xs font-medium bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
-              Cổng của admin: {portalAdmin.username}
+              Cổng riêng · Private Portal
             </span>
           )}
         </div>
