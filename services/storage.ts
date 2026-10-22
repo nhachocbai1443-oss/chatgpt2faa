@@ -2,9 +2,11 @@ import { supabase } from './supabaseClient';
 import { User } from '../types';
 import { DEFAULT_ADMIN, DEFAULT_USER } from '../constants';
 
-// --- PHÂN QUYỀN ADMIN GỐC / ADMIN PHỤ ---
+// --- PHÂN QUYỀN ADMIN GỐC / ADMIN PHỤ + LINK CỔNG RIÊNG ---
+// Mỗi admin có một "cổng" (portal) riêng theo link: /chatgpt2faa/<username-cua-admin>
+// User chỉ đăng nhập được ở cổng của admin đã tạo ra mình, nên các admin khác nhau
+// có thể tạo user trùng tên nhau mà không xung đột.
 
-// Admin gốc là tài khoản mặc định của hệ thống (dinhtom)
 export const isRootAdmin = (user: User | null | undefined): boolean => {
   return !!user && user.username.toLowerCase() === DEFAULT_ADMIN.username.toLowerCase();
 };
@@ -13,6 +15,19 @@ export const isRootAdmin = (user: User | null | undefined): boolean => {
 // Dữ liệu cũ (createdBy null) coi như do admin gốc tạo.
 export const ownerIdOf = (user: User): string => {
   return user.createdBy ?? DEFAULT_ADMIN.id;
+};
+
+// Lấy mọi dòng trùng username (không phân biệt hoa/thường), bỏ qua dòng đã vào thùng rác.
+// Từ khi có phân quyền, username user thường có thể trùng nhau giữa các admin khác nhau,
+// nên không dùng maybeSingle() cho username nữa.
+const listByUsername = async (username: string): Promise<User[]> => {
+  const { data, error } = await supabase
+    .from('users')
+    .select('*')
+    .ilike('username', username);
+
+  if (error) throw error;
+  return ((data as User[]) || []).filter(u => !u.username.startsWith('__TRASH__'));
 };
 
 // --- SUPABASE METHODS ---
@@ -47,17 +62,13 @@ export const getStoredUsers = async (): Promise<User[]> => {
 
 export const findUserByUsername = async (username: string): Promise<User | null> => {
   try {
-    const { data, error } = await supabase
-      .from('users')
-      .select('*')
-      .ilike('username', username)
-      .maybeSingle();
-
-    if (error) throw error;
+    const rows = await listByUsername(username);
+    // Ưu tiên trả về tài khoản admin nếu có nhiều dòng trùng tên
+    const found = rows.find(u => u.isAdmin) ?? rows[0] ?? null;
 
     // Logic đảm bảo Admin mặc định luôn tồn tại nếu bị xóa nhầm
     // Lưu ý: Nếu admin đã bị chuyển vào trash (đổi tên), logic này sẽ không tìm thấy admin cũ và sẽ tạo lại admin mới (restore).
-    if (!data && username.toLowerCase() === DEFAULT_ADMIN.username.toLowerCase()) {
+    if (!found && username.toLowerCase() === DEFAULT_ADMIN.username.toLowerCase()) {
         console.log(`Admin '${DEFAULT_ADMIN.username}' missing. Restoring...`);
         const { error: upsertError } = await supabase
             .from('users')
@@ -66,23 +77,73 @@ export const findUserByUsername = async (username: string): Promise<User | null>
         if (!upsertError) return DEFAULT_ADMIN;
     }
 
-    return data as User | null;
+    return found;
   } catch (error) {
     console.error("Error finding user:", error);
     return null;
   }
 };
 
-// Hàm nội bộ: tạo một tài khoản (user thường hoặc admin phụ)
-const createAccount = async (
+// Tìm tài khoản ADMIN theo username — dùng để xác định chủ nhân của link cổng /<username>.
+// Trả về null nếu không có admin nào tên như vậy (link không hợp lệ).
+export const findAdminByUsername = async (username: string): Promise<User | null> => {
+  try {
+    const rows = await listByUsername(username);
+    const admin = rows.find(u => u.isAdmin);
+    if (admin) return admin;
+
+    // Riêng admin gốc: tận dụng cơ chế tự khôi phục nếu bị xóa nhầm
+    if (username.toLowerCase() === DEFAULT_ADMIN.username.toLowerCase()) {
+      const restored = await findUserByUsername(username);
+      if (restored && restored.isAdmin) return restored;
+    }
+    return null;
+  } catch (error) {
+    console.error("Error finding admin:", error);
+    return null;
+  }
+};
+
+// Đăng nhập TRONG MỘT CỔNG cụ thể:
+// - Nhập đúng username của chủ cổng -> đăng nhập với tư cách admin đó.
+// - Ngược lại chỉ tìm user thường do chính chủ cổng tạo (createdBy trùng id của chủ cổng).
+// User của admin khác (kể cả trùng tên) sẽ KHÔNG đăng nhập được ở cổng này.
+export const findUserInPortal = async (username: string, portalAdmin: User): Promise<User | null> => {
+  try {
+    if (username.toLowerCase() === portalAdmin.username.toLowerCase()) {
+      return portalAdmin;
+    }
+    const rows = await listByUsername(username);
+    const mine = rows.filter(u => !u.isAdmin && ownerIdOf(u) === portalAdmin.id);
+    return mine[0] ?? null;
+  } catch (error) {
+    console.error("Error finding user in portal:", error);
+    return null;
+  }
+};
+
+// Kiểm tra tên khi tạo USER THƯỜNG cho một admin:
+// - Không được trùng tên bất kỳ tài khoản admin nào (tên admin là duy nhất toàn hệ thống,
+//   vì còn dùng làm link cổng).
+// - Không được trùng user khác CỦA CÙNG admin đó.
+// - Trùng tên user của admin khác thì ĐƯỢC PHÉP (mỗi cổng là một không gian riêng).
+const assertNameAvailableForUser = async (username: string, ownerId: string) => {
+  const rows = await listByUsername(username);
+  if (rows.some(u => u.isAdmin)) {
+    throw new Error("Tên này đã được dùng cho tài khoản admin, hãy chọn tên khác");
+  }
+  if (rows.some(u => !u.isAdmin && ownerIdOf(u) === ownerId)) {
+    throw new Error("User này đã tồn tại");
+  }
+};
+
+// Hàm nội bộ: chèn một tài khoản mới vào database
+const insertAccount = async (
   username: string,
   secret: string,
   isAdmin: boolean,
   createdBy: string
 ): Promise<User> => {
-  const existing = await findUserByUsername(username);
-  if (existing) throw new Error("User này đã tồn tại");
-
   const newUser: User = {
     id: crypto.randomUUID(),
     username,
@@ -100,16 +161,22 @@ const createAccount = async (
 
 // Tạo user thường, thuộc quyền quản lý của admin đang đăng nhập (createdBy)
 export const createUser = async (username: string, secret: string, createdBy: string): Promise<User> => {
-  return createAccount(username, secret, false, createdBy);
+  await assertNameAvailableForUser(username, createdBy);
+  return insertAccount(username, secret, false, createdBy);
 };
 
 // Tạo admin phụ (chỉ admin gốc mới được gọi hàm này từ giao diện).
-// Admin phụ đăng nhập bằng username như bình thường và chỉ thấy user do chính họ tạo.
+// Tên admin phụ phải duy nhất trên TOÀN hệ thống (vì dùng làm link cổng),
+// nên không được trùng bất kỳ user/admin nào đang có.
 export const createSubAdmin = async (username: string, createdBy: string): Promise<User> => {
   if (username.toLowerCase() === DEFAULT_ADMIN.username.toLowerCase()) {
     throw new Error("Tên này trùng với admin gốc");
   }
-  return createAccount(username, '', true, createdBy);
+  const rows = await listByUsername(username);
+  if (rows.length > 0) {
+    throw new Error("Tên này đã có người dùng, hãy chọn tên khác cho admin phụ");
+  }
+  return insertAccount(username, '', true, createdBy);
 };
 
 export const updateUserSecret = async (id: string, newSecret: string) => {
