@@ -10,7 +10,8 @@ import { Lock, ArrowRight, ShieldCheck, AlertTriangle, Home } from 'lucide-react
 // Khớp với "base" trong vite.config.ts
 const BASE_PATH = '/chatgpt2faa';
 
-// Đọc tên cổng từ URL: /chatgpt2faa/<ten-admin> (hoặc dự phòng dạng #/<ten-admin>).
+// Đọc mã cổng từ URL: /chatgpt2faa/<ma-ngau-nhien> (hoặc dự phòng dạng #/<ma>).
+// Mã cổng là chuỗi ngẫu nhiên cấp cho từng admin phụ, không chứa username.
 // Trả về null nếu đang ở link gốc (cổng của admin gốc).
 const parsePortalSlug = (): string | null => {
   let segment = '';
@@ -61,7 +62,7 @@ const App: React.FC = () => {
     }
     let cancelled = false;
     (async () => {
-      const admin = await Storage.findAdminByUsername(slug);
+      const admin = await Storage.findAdminBySlug(slug);
       if (cancelled) return;
       if (admin) {
         setPortalAdmin(admin);
