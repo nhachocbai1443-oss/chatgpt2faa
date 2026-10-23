@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { User, AuthState } from './types';
 import * as Storage from './services/storage';
-import { DEFAULT_ADMIN } from './constants';
 import { syncTime } from './services/totpService';
 import { AdminPanel } from './components/AdminPanel';
 import { UserPanel } from './components/UserPanel';
@@ -85,13 +84,13 @@ const App: React.FC = () => {
       const input = usernameInput.trim();
       let user: User | null = null;
 
-      if (!portalAdmin && input.toLowerCase() === DEFAULT_ADMIN.username.toLowerCase()) {
-        // Ở cổng chính, admin gốc đăng nhập qua hàm cũ để giữ cơ chế tự khôi phục tài khoản
-        const found = await Storage.findUserByUsername(input);
-        user = found && found.isAdmin ? found : null;
-      } else {
+      // Chủ cổng: vào bằng link cổng phụ thì chủ cổng đã xác định từ link;
+      // ở cổng chính thì lấy admin gốc từ database.
+      // (Đã bỏ tài khoản admin ghi sẵn trong code — code frontend không còn
+      // chứa username/secret của admin nữa.)
+      const owner = portalAdmin ?? (await Storage.getRootAdmin());
+      if (owner) {
         // Trong một cổng: chỉ chấp nhận chủ cổng hoặc user do chủ cổng tạo
-        const owner = portalAdmin ?? DEFAULT_ADMIN;
         user = await Storage.findUserInPortal(input, owner);
       }
 
