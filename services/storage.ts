@@ -1,6 +1,6 @@
 import { supabase } from './supabaseClient';
 import { User } from '../types';
-import { DEFAULT_ADMIN, DEFAULT_USER } from '../constants';
+import { ROOT_ADMIN_ID } from '../constants';
 
 // --- PHÂN QUYỀN ADMIN GỐC / ADMIN PHỤ + LINK CỔNG RIÊNG ---
 // Mỗi admin phụ có một "cổng" (portal) riêng theo link: /chatgpt2faa/<ma-ngau-nhien>
@@ -9,13 +9,34 @@ import { DEFAULT_ADMIN, DEFAULT_USER } from '../constants';
 // có thể tạo user trùng tên nhau mà không xung đột.
 
 export const isRootAdmin = (user: User | null | undefined): boolean => {
-  return !!user && user.username.toLowerCase() === DEFAULT_ADMIN.username.toLowerCase();
+  // Admin gốc = tài khoản admin KHÔNG có createdBy (admin phụ luôn có
+  // createdBy là ID của admin đã tạo ra mình). Nhận diện từ dữ liệu trong
+  // database, không so username ghi sẵn trong code như trước nữa.
+  return !!user && user.isAdmin && !user.createdBy;
 };
 
 // ID của admin sở hữu một tài khoản.
 // Dữ liệu cũ (createdBy null) coi như do admin gốc tạo.
 export const ownerIdOf = (user: User): string => {
-  return user.createdBy ?? DEFAULT_ADMIN.id;
+  return user.createdBy ?? ROOT_ADMIN_ID;
+};
+
+// Lấy tài khoản admin gốc từ database (admin có createdBy trống).
+// Dùng làm chủ cổng chính thay cho tài khoản admin ghi sẵn trong code trước đây.
+export const getRootAdmin = async (): Promise<User | null> => {
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('isAdmin', true)
+      .is('createdBy', null);
+    if (error) throw error;
+    const admins = ((data as User[]) || []).filter(u => !u.username.startsWith('__TRASH__'));
+    return admins[0] ?? null;
+  } catch (error) {
+    console.error("Error finding root admin:", error);
+    return null;
+  }
 };
 
 // Lấy mọi dòng trùng username (không phân biệt hoa/thường), bỏ qua dòng đã vào thùng rác.
@@ -78,13 +99,11 @@ export const getStoredUsers = async (): Promise<User[]> => {
 
     if (error) throw error;
 
-    // Nếu database hoàn toàn trống (0 dòng), tự động thêm admin mặc định
+    // Database trống thì trả về danh sách rỗng.
+    // (Đã bỏ cơ chế tự tạo tài khoản mặc định ghi sẵn trong code vì nó làm
+    // lộ username + secret của admin trong bản JS công khai.)
     if (!data || data.length === 0) {
-       console.log("Database empty, seeding defaults...");
-       const defaults = [DEFAULT_ADMIN, DEFAULT_USER];
-       const { error: insertError } = await supabase.from('users').insert(defaults);
-       if (insertError) throw insertError;
-       return defaults;
+       return [];
     }
 
     // LỌC BỎ CÁC USER ĐÃ BỊ "XÓA MỀM" (CÓ TÊN BẮT ĐẦU BẰNG __TRASH__)
@@ -103,16 +122,8 @@ export const findUserByUsername = async (username: string): Promise<User | null>
     // Ưu tiên trả về tài khoản admin nếu có nhiều dòng trùng tên
     const found = rows.find(u => u.isAdmin) ?? rows[0] ?? null;
 
-    // Logic đảm bảo Admin mặc định luôn tồn tại nếu bị xóa nhầm
-    // Lưu ý: Nếu admin đã bị chuyển vào trash (đổi tên), logic này sẽ không tìm thấy admin cũ và sẽ tạo lại admin mới (restore).
-    if (!found && username.toLowerCase() === DEFAULT_ADMIN.username.toLowerCase()) {
-        console.log(`Admin '${DEFAULT_ADMIN.username}' missing. Restoring...`);
-        const { error: upsertError } = await supabase
-            .from('users')
-            .upsert([DEFAULT_ADMIN]);
-
-        if (!upsertError) return DEFAULT_ADMIN;
-    }
+    // Đã bỏ cơ chế tự khôi phục admin mặc định từ code: tài khoản admin chỉ
+    // tồn tại trong database, code không giữ bản ghi sẵn nào của admin nữa.
 
     return found;
   } catch (error) {
@@ -127,12 +138,6 @@ export const findAdminByUsername = async (username: string): Promise<User | null
     const rows = await listByUsername(username);
     const admin = rows.find(u => u.isAdmin);
     if (admin) return admin;
-
-    // Riêng admin gốc: tận dụng cơ chế tự khôi phục nếu bị xóa nhầm
-    if (username.toLowerCase() === DEFAULT_ADMIN.username.toLowerCase()) {
-      const restored = await findUserByUsername(username);
-      if (restored && restored.isAdmin) return restored;
-    }
     return null;
   } catch (error) {
     console.error("Error finding admin:", error);
@@ -233,9 +238,8 @@ export const createUser = async (username: string, secret: string, createdBy: st
 // Tên admin phụ phải duy nhất trên TOÀN hệ thống, và tài khoản được cấp ngay
 // một mã link ngẫu nhiên để làm cổng riêng.
 export const createSubAdmin = async (username: string, createdBy: string): Promise<User> => {
-  if (username.toLowerCase() === DEFAULT_ADMIN.username.toLowerCase()) {
-    throw new Error("Tên này trùng với admin gốc");
-  }
+  // Tên trùng bất kỳ tài khoản nào đang có trong database (gồm admin gốc)
+  // đều bị chặn ở bước kiểm tra dưới đây.
   const rows = await listByUsername(username);
   if (rows.length > 0) {
     throw new Error("Tên này đã có người dùng, hãy chọn tên khác cho admin phụ");
